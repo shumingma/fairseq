@@ -14,6 +14,7 @@ import tempfile
 import warnings
 from itertools import accumulate
 from typing import Callable, Dict, List, Optional
+import math
 
 import numpy as np
 import torch
@@ -327,7 +328,7 @@ def multi_tensor_total_norm(grads, chunk_size=2048 * 32) -> torch.Tensor:
 
 
 @torch.no_grad()
-def clip_grad_norm_(params, max_norm, aggregate_norm_fn=None) -> torch.Tensor:
+def clip_grad_norm_(params, max_norm, moe_expert_count=1, aggregate_norm_fn=None) -> torch.Tensor:
     def grad_exists(p):
         return p is not None and getattr(p, "grad", None) is not None
     if isinstance(params, torch.Tensor):
@@ -335,9 +336,10 @@ def clip_grad_norm_(params, max_norm, aggregate_norm_fn=None) -> torch.Tensor:
     params = list(params)
     params = list(filter(grad_exists, params))
     grads, expert_grads, base_expert_grads, sharded_grads = [], [], [], []
+    denom = math.sqrt(max(dist.get_global_world_size(), moe_expert_count))
     for p in params:
         if hasattr(p, "expert"):
-            expert_grads.append(p.grad.detach())
+            expert_grads.append(p.grad.detach() / denom)
         elif hasattr(p, "base_expert"):
             base_expert_grads.append(p.grad.detach())
         elif hasattr(p, "_is_sharded"):

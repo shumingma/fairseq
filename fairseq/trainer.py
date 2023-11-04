@@ -1171,7 +1171,8 @@ class Trainer(object):
         metrics.log_scalar("num_updates", self._num_updates, weight=0, priority=200)
 
     def clip_grad_norm(self, clip_norm):
-        return self.optimizer.clip_grad_norm(clip_norm, aggregate_norm_fn=None)
+        moe_expert_count = getattr(self.cfg.model, 'moe_expert_count', 1)
+        return self.optimizer.clip_grad_norm(clip_norm, moe_expert_count, aggregate_norm_fn=None)
 
     def cumulative_training_time(self):
         if self._cumulative_training_time is None:

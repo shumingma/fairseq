@@ -36,7 +36,7 @@ class MegatronTrainer(Trainer):
             )
         super().__init__(cfg, task, model, criterion, **kwargs)
 
-    def clip_grad_norm(self, clip_norm):
+    def clip_grad_norm(self, clip_norm, moe_expert_count=1):
         def _aggregate_model_parallel_grad_norm(total_norm):
             total_norm = total_norm ** 2
             distributed_utils.all_reduce(
@@ -47,6 +47,7 @@ class MegatronTrainer(Trainer):
 
         return self.optimizer.clip_grad_norm(
             clip_norm,
+            moe_expert_count,
             aggregate_norm_fn=_aggregate_model_parallel_grad_norm,
         )
 
