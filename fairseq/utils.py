@@ -21,6 +21,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor
+from fairseq.distributed import utils as distributed_utils
 
 
 try:
@@ -336,7 +337,7 @@ def clip_grad_norm_(params, max_norm, moe_expert_count=1, aggregate_norm_fn=None
     params = list(params)
     params = list(filter(grad_exists, params))
     grads, expert_grads, base_expert_grads, sharded_grads = [], [], [], []
-    denom = math.sqrt(max(dist.get_global_world_size(), moe_expert_count))
+    denom = math.sqrt(max(distributed_utils.get_global_world_size(), moe_expert_count))
     for p in params:
         if hasattr(p, "expert"):
             expert_grads.append(p.grad.detach() / denom)
