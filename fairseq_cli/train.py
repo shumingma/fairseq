@@ -36,6 +36,7 @@ from fairseq.model_parallel.megatron_trainer import MegatronTrainer
 from fairseq.trainer import Trainer
 from omegaconf import DictConfig, OmegaConf
 
+import transformer_engine.pytorch as te
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -300,30 +301,32 @@ def train(
     should_stop = False
     num_updates = trainer.get_num_updates()
     logger.info("Start iterating over samples")
-    for i, samples in enumerate(progress):
-        with metrics.aggregate("train_inner"), torch.autograd.profiler.record_function(
-            "train_step-%d" % i
-        ):
-            log_output = trainer.train_step(samples)
+    
+    with te.fp8_autocast(enabled=True):
+        for i, samples in enumerate(progress):
+            with metrics.aggregate("train_inner"), torch.autograd.profiler.record_function(
+                "train_step-%d" % i
+            ):
+                log_output = trainer.train_step(samples)
 
-        if log_output is not None:  # not OOM, overflow, ...
-            # log mid-epoch stats
-            num_updates = trainer.get_num_updates()
-            if num_updates % cfg.common.log_interval == 0:
-                stats = get_training_stats(metrics.get_smoothed_values("train_inner"))
-                progress.log(stats, tag="train_inner", step=num_updates)
+            if log_output is not None:  # not OOM, overflow, ...
+                # log mid-epoch stats
+                num_updates = trainer.get_num_updates()
+                if num_updates % cfg.common.log_interval == 0:
+                    stats = get_training_stats(metrics.get_smoothed_values("train_inner"))
+                    progress.log(stats, tag="train_inner", step=num_updates)
 
-                # reset mid-epoch stats after each log interval
-                # the end-of-epoch stats will still be preserved
-                metrics.reset_meters("train_inner")
+                    # reset mid-epoch stats after each log interval
+                    # the end-of-epoch stats will still be preserved
+                    metrics.reset_meters("train_inner")
 
-        end_of_epoch = not itr.has_next()
-        valid_losses, should_stop = validate_and_save(
-            cfg, trainer, task, epoch_itr, valid_subsets, end_of_epoch
-        )
+            end_of_epoch = not itr.has_next()
+            valid_losses, should_stop = validate_and_save(
+                cfg, trainer, task, epoch_itr, valid_subsets, end_of_epoch
+            )
 
-        if should_stop:
-            break
+            if should_stop:
+                break
 
     # log end-of-epoch stats
     logger.info("end of epoch {} (average epoch stats below)".format(epoch_itr.epoch))
