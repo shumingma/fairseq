@@ -27,6 +27,7 @@ from fairseq.optim import lr_scheduler
 from torchscale.component.xmoe.global_groups import get_moe_group, _find_my_group_index
 import torch.distributed as dist
 
+from time import perf_counter
 from omegaconf import OmegaConf
 import re
 
@@ -891,12 +892,21 @@ class Trainer(object):
         logger.debug(f"[{self.get_num_updates()}] done with fwd, bwd")
         try:
             with torch.autograd.profiler.record_function("reduce-grads"):
+                
+                torch.cuda.synchronize()
+                start = perf_counter()
                 # reduce gradients across workers
                 self.optimizer.all_reduce_grads(self.model)
                 if utils.has_parameters(self.criterion):
                     self.optimizer.all_reduce_grads(self.criterion)
+                torch.cuda.synchronize()
+                end = perf_counter()
+                print(f'reduce-grads cost_time: {1000*(end-start):5f}ms')
 
             with torch.autograd.profiler.record_function("multiply-grads"):
+                
+                torch.cuda.synchronize()
+                start = perf_counter()
                 # multiply gradients by (data_parallel_size / sample_size) since
                 # DDP normalizes by the number of data parallel workers for
                 # improved fp16 precision.
@@ -914,10 +924,18 @@ class Trainer(object):
                 # Note: (sample_size or 1.0) handles the case of a zero gradient, in a
                 # way that avoids CPU/device transfers in case sample_size is a GPU or
                 # TPU object. The assumption is that the gradient itself is also 0.
+                torch.cuda.synchronize()
+                end = perf_counter()
+                print(f'multiply-grads cost_time: {1000*(end-start):5f}ms')
 
             with torch.autograd.profiler.record_function("clip-grads"):
                 # clip grads
+                torch.cuda.synchronize()
+                start = perf_counter()
                 grad_norm = self.clip_grad_norm(self.cfg.optimization.clip_norm)
+                torch.cuda.synchronize()
+                end = perf_counter()
+                print(f'clip-grads cost_time: {1000*(end-start):5f}ms')
 
             # check that grad norms are consistent across workers
             # on tpu check tensor is slow
@@ -934,10 +952,15 @@ class Trainer(object):
                     raise FloatingPointError("gradients are Nan/Inf")
 
             with torch.autograd.profiler.record_function("optimizer"):
+                torch.cuda.synchronize()
+                start = perf_counter()
                 # take an optimization step
                 self.task.optimizer_step(
                     self.optimizer, model=self.model, update_num=self.get_num_updates()
                 )
+                torch.cuda.synchronize()
+                end = perf_counter()
+                print(f'optimizer cost_time: {1000*(end-start):5f}ms')
             logger.debug(f"[{self.get_num_updates()}] done with optimizer step")
 
         except FloatingPointError:
