@@ -825,6 +825,7 @@ class Trainer(object):
                         optimizer=self.optimizer,
                         update_num=self.get_num_updates(),
                         ignore_grad=is_dummy_batch,
+                        is_first_microbatch=(i==0),
                     )
                     del loss
 
