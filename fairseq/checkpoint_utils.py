@@ -137,7 +137,13 @@ def save_checkpoint(
                 assert PathManager.copy(src, dest, overwrite=True), f"Failed to copy {src} to {dest}"
 
         for cp in checkpoints[1:]:
-            copy_or_symlink(src=checkpoints[0], dest=cp)
+            if trainer.cfg.distributed_training.zero_sharding == "os":
+                copy_or_symlink(
+                    src=checkpoints[0].replace('.pt', f'-zero-{trainer.zero_group_local_rank}.pt'), 
+                    dest=cp.replace('.pt', f'-zero-{trainer.zero_group_local_rank}.pt')
+                )
+            else:
+                copy_or_symlink(src=checkpoints[0], dest=cp)
             if (trainer.is_moe or trainer.is_base_moe) and not trainer.is_fsdp and trainer.is_data_parallel_master:
                 copy_or_symlink(
                     src=re.sub("rank-[0-9]+", "shared", checkpoints[0]),

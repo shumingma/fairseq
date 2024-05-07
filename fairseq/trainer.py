@@ -32,6 +32,15 @@ import re
 
 logger = logging.getLogger(__name__)
 
+def get_zero_local_rank(num_gpus):
+    if torch.distributed.is_initialized():
+        ddp_rank = distributed_utils.get_data_parallel_rank()
+        return ddp_rank % num_gpus
+
+def get_zero_local_group(num_gpus):
+    if torch.distributed.is_initialized():
+        ddp_rank = distributed_utils.get_data_parallel_rank()
+        return ddp_rank // num_gpus
 
 def get_zero_group(num_gpus):
     if torch.distributed.is_initialized():
@@ -157,9 +166,19 @@ class Trainer(object):
             if self.is_moe:
                 _, self.expert_group = get_moe_group(self.cfg.model.moe_expert_count)
             else:
+                # if self.cfg.distributed_training.zero_group_size > 0:
+                #     self.expert_group = get_zero_group(torch.cuda.device_count() * self.cfg.distributed_training.zero_group_size)
+                # else:
+                #     self.expert_group = self.data_parallel_process_group
                 if self.cfg.distributed_training.zero_group_size > 0:
-                    self.expert_group = get_zero_group(torch.cuda.device_count() * self.cfg.distributed_training.zero_group_size)
+                    gpus_per_group = torch.cuda.device_count() * self.cfg.distributed_training.zero_group_size
+                    self.zero_group_local_rank = get_zero_local_rank(gpus_per_group)
+                    self.zero_group_local_group = get_zero_local_group(gpus_per_group)
+                    self.expert_group = get_zero_group(gpus_per_group)
                 else:
+                    gpus_per_group = self.data_parallel_world_size
+                    self.zero_group_local_rank = get_zero_local_rank(gpus_per_group)
+                    self.zero_group_local_group = get_zero_local_group(gpus_per_group)
                     self.expert_group = self.data_parallel_process_group
 
         # TODO(myleott): support tpu
@@ -236,7 +255,11 @@ class Trainer(object):
     def should_save_checkpoint_on_current_rank(self) -> bool:
         """Indicates whether to save checkpoints on the current DDP rank."""
         has_alt_ffn_dim = getattr(self.cfg.model, "alternate_decoder_ffn_embed_dim", 0) != 0
-        if (self.is_fsdp or (self.is_moe and not has_alt_ffn_dim and self.data_parallel_rank < self.cfg.model.moe_expert_count) or
+        if self.cfg.distributed_training.zero_sharding == "os":
+            if self.zero_group_local_group == 0:
+                return True
+            return False
+        elif (self.is_fsdp or (self.is_moe and not has_alt_ffn_dim and self.data_parallel_rank < self.cfg.model.moe_expert_count) or
                 getattr(self.cfg.model, "base_layers", 0) > 0):
             return True
         else:
@@ -387,7 +410,7 @@ class Trainer(object):
     def consolidate_optimizer(self):
         """For OSS, we need to consolidate the state dict."""
         self._gathered_optim_state = None
-        if self.cfg.checkpoint.no_save_optimizer_state:
+        if self.cfg.checkpoint.no_save_optimizer_state or self.cfg.distributed_training.zero_sharding == "os":
             return
         if hasattr(self.optimizer.optimizer, "consolidate_state_dict"):
             self.optimizer.optimizer.consolidate_state_dict()
@@ -399,7 +422,25 @@ class Trainer(object):
             assert self._gathered_optim_state is not None
 
     def state_dict(self, filename, training_finished=False) -> Dict[str, Dict]:
-        if self.is_moe or self.is_base_moe:
+        if self.cfg.distributed_training.zero_sharding == 'os':
+            model_state_dict = self.model.state_dict() if self.zero_group_local_rank == 0 else {}
+            filename = filename.replace('.pt', f'-zero-{self.zero_group_local_rank}.pt')
+
+            optim_state = None
+            if not self.cfg.checkpoint.no_save_optimizer_state:
+                # optim_state = self._gathered_optim_state or self.optimizer.state_dict()
+                optim_state = getattr(self, '_gathered_optim_state', None) or self.optimizer.state_dict()
+                if self.zero_group_local_rank > 0:
+                    optim_state["global_optim_state"] = {}
+                    optim_state["_partition_parameters_cache"] = {}
+                    optim_state["_param_to_index"] = {}
+
+            model_save_list = [(
+                filename,
+                model_state_dict,
+                optim_state,
+            )]
+        elif self.is_moe or self.is_base_moe:
             (
                 (shared_model_state_dict, shared_optimizer_state_dict),
                 (expert_model_state_dict, expert_optimizer_state_dict),
