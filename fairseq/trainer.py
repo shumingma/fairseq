@@ -26,11 +26,27 @@ from fairseq.nan_detector import NanDetector
 from fairseq.optim import lr_scheduler
 from torchscale.component.xmoe.global_groups import get_moe_group, _find_my_group_index
 import torch.distributed as dist
+from time import perf_counter
+import os
 
 from omegaconf import OmegaConf
 import re
 
 logger = logging.getLogger(__name__)
+
+def profiling(name):
+    profiling_env = os.environ.get('PROFILING')
+    if profiling_env and int(profiling_env) == 1:
+        torch.cuda.synchronize()
+        start = perf_counter()
+        try:
+            yield
+        finally:
+            torch.cuda.synchronize()
+            end = perf_counter()
+            logger.info(f'{name} cost_time: {1000*(end-start):5f}ms')
+    else:
+        yield
 
 def get_zero_local_rank(num_gpus):
     if torch.distributed.is_initialized():
@@ -933,10 +949,11 @@ class Trainer(object):
         logger.debug(f"[{self.get_num_updates()}] done with fwd, bwd")
         try:
             with torch.autograd.profiler.record_function("reduce-grads"):
-                # reduce gradients across workers
-                self.optimizer.all_reduce_grads(self.model)
-                if utils.has_parameters(self.criterion):
-                    self.optimizer.all_reduce_grads(self.criterion)
+                with profiling("reduce-grads"):
+                    # reduce gradients across workers
+                    self.optimizer.all_reduce_grads(self.model)
+                    if utils.has_parameters(self.criterion):
+                        self.optimizer.all_reduce_grads(self.criterion)
 
             with torch.autograd.profiler.record_function("multiply-grads"):
                 # multiply gradients by (data_parallel_size / sample_size) since
@@ -977,9 +994,10 @@ class Trainer(object):
 
             with torch.autograd.profiler.record_function("optimizer"):
                 # take an optimization step
-                self.task.optimizer_step(
-                    self.optimizer, model=self.model, update_num=self.get_num_updates()
-                )
+                with profiling("optimizer"):
+                    self.task.optimizer_step(
+                        self.optimizer, model=self.model, update_num=self.get_num_updates()
+                    )
             logger.debug(f"[{self.get_num_updates()}] done with optimizer step")
 
         except FloatingPointError:
